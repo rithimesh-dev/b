@@ -1,249 +1,155 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useRef, useMemo } from 'react';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import * as THREE from 'three';
 
-const FluidBackground = () => {
-    const canvasRef = useRef(null);
+const FluidShader = {
+    uniforms: {
+        uTime: { value: 0 },
+        uMouse: { value: new THREE.Vector2(0, 0) },
+        uResolution: { value: new THREE.Vector2(1, 1) },
+        uColor1: { value: new THREE.Color('#0f0f0f') }, // Matte Black
+        uColor2: { value: new THREE.Color('#1a1a1a') }, // Dark Gray
+        uAccent: { value: new THREE.Color('#ffffff') }, // Neon White
+    },
+    vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+    fragmentShader: `
+    uniform float uTime;
+    uniform vec2 uMouse;
+    uniform vec2 uResolution;
+    uniform vec3 uColor1;
+    uniform vec3 uColor2;
+    uniform vec3 uAccent;
+    varying vec2 vUv;
 
-    useEffect(() => {
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext('2d');
+    // Simplex 2D noise
+    vec3 permute(vec3 x) { return mod(((x*34.0)+1.0)*x, 289.0); }
 
-        // Simulation parameters
-        const SIM_RESOLUTION = 128;
-        const DYE_RESOLUTION = 512;
-        const DENSITY_DISSIPATION = 0.97;
-        const VELOCITY_DISSIPATION = 0.98;
-        const PRESSURE = 0.8;
-        const PRESSURE_ITERATIONS = 20;
-        const CURL = 30;
-        const SPLAT_RADIUS = 0.25;
-        const SPLAT_FORCE = 6000;
+    float snoise(vec2 v){
+      const vec4 C = vec4(0.211324865405187, 0.366025403784439,
+               -0.577350269189626, 0.024390243902439);
+      vec2 i  = floor(v + dot(v, C.yy) );
+      vec2 x0 = v -   i + dot(i, C.xx);
+      vec2 i1;
+      i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+      vec4 x12 = x0.xyxy + C.xxzz;
+      x12.xy -= i1;
+      i = mod(i, 289.0);
+      vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 ))
+      + i.x + vec3(0.0, i1.x, 1.0 ));
+      vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+      m = m*m ;
+      m = m*m ;
+      vec3 x = 2.0 * fract(p * C.www) - 1.0;
+      vec3 h = abs(x) - 0.5;
+      vec3 ox = floor(x + 0.5);
+      vec3 a0 = x - ox;
+      m *= 1.79284291400159 - 0.85373472095314 * ( a0*a0 + h*h );
+      vec3 g;
+      g.x  = a0.x  * x0.x  + h.x  * x0.y;
+      g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+      return 130.0 * dot(m, g);
+    }
 
-        let width, height;
-        let pointer = { x: 0, y: 0, dx: 0, dy: 0, moved: false };
+    void main() {
+      vec2 uv = vUv;
+      
+      // Aspect ratio correction
+      float aspect = uResolution.x / uResolution.y;
+      vec2 aspectUV = uv;
+      aspectUV.x *= aspect;
+      
+      // Mouse influence
+      vec2 mouse = uMouse;
+      mouse.x *= aspect;
+      
+      float dist = distance(aspectUV, mouse);
+      float mouseInteraction = smoothstep(0.5, 0.0, dist);
+      
+      // Fluid distortion
+      float noise1 = snoise(uv * 3.0 + uTime * 0.1);
+      float noise2 = snoise(uv * 10.0 - uTime * 0.2 + mouseInteraction * 2.0);
+      
+      vec2 distortedUV = uv + vec2(noise1 * 0.05, noise2 * 0.05);
+      
+      // Color mixing
+      float mixFactor = snoise(distortedUV * 2.0 + uTime * 0.05);
+      mixFactor = smoothstep(-0.5, 0.5, mixFactor);
+      
+      vec3 color = mix(uColor1, uColor2, mixFactor);
+      
+      // Add "refraction" / highlight
+      float highlight = smoothstep(0.4, 0.42, noise2) - smoothstep(0.42, 0.45, noise2);
+      color += uAccent * highlight * 0.1;
+      
+      // Mouse trail glow
+      color += uAccent * mouseInteraction * 0.05;
 
-        // Grid structures
-        // We'll use a simplified solver for React/Canvas performance
-        // Based on Jos Stam's Real-Time Fluid Dynamics for Games
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `
+};
 
-        let size = SIM_RESOLUTION * SIM_RESOLUTION;
-        let density = new Float32Array(size);
-        let u = new Float32Array(size); // Velocity X
-        let v = new Float32Array(size); // Velocity Y
-        let u_prev = new Float32Array(size);
-        let v_prev = new Float32Array(size);
-        let dens_prev = new Float32Array(size);
+const FluidPlane = () => {
+    const mesh = useRef();
+    const { size, viewport } = useThree();
+    const mouse = useRef(new THREE.Vector2(0, 0));
 
-        const resize = () => {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-        };
+    const uniforms = useMemo(
+        () => ({
+            uTime: { value: 0 },
+            uMouse: { value: new THREE.Vector2(0, 0) },
+            uResolution: { value: new THREE.Vector2(size.width, size.height) },
+            uColor1: { value: new THREE.Color('#0f0f0f') },
+            uColor2: { value: new THREE.Color('#1a1a1a') },
+            uAccent: { value: new THREE.Color('#ffffff') },
+        }),
+        []
+    );
 
-        const getIndex = (x, y) => {
-            return Math.min(Math.max(x, 0), SIM_RESOLUTION - 1) + Math.min(Math.max(y, 0), SIM_RESOLUTION - 1) * SIM_RESOLUTION;
-        };
+    useFrame((state) => {
+        const { clock, pointer } = state;
+        if (mesh.current) {
+            mesh.current.material.uniforms.uTime.value = clock.getElapsedTime();
 
-        const addSource = (x, s, dt) => {
-            for (let i = 0; i < size; i++) x[i] += s[i] * dt;
-        };
+            // Smooth mouse movement
+            mouse.current.lerp(pointer, 0.1);
 
-        const setBnd = (b, x) => {
-            for (let i = 1; i < SIM_RESOLUTION - 1; i++) {
-                x[getIndex(0, i)] = b === 1 ? -x[getIndex(1, i)] : x[getIndex(1, i)];
-                x[getIndex(SIM_RESOLUTION - 1, i)] = b === 1 ? -x[getIndex(SIM_RESOLUTION - 2, i)] : x[getIndex(SIM_RESOLUTION - 2, i)];
-                x[getIndex(i, 0)] = b === 2 ? -x[getIndex(i, 1)] : x[getIndex(i, 1)];
-                x[getIndex(i, SIM_RESOLUTION - 1)] = b === 2 ? -x[getIndex(i, SIM_RESOLUTION - 2)] : x[getIndex(i, SIM_RESOLUTION - 2)];
-            }
-            x[getIndex(0, 0)] = 0.5 * (x[getIndex(1, 0)] + x[getIndex(0, 1)]);
-            x[getIndex(0, SIM_RESOLUTION - 1)] = 0.5 * (x[getIndex(1, SIM_RESOLUTION - 1)] + x[getIndex(0, SIM_RESOLUTION - 2)]);
-            x[getIndex(SIM_RESOLUTION - 1, 0)] = 0.5 * (x[getIndex(SIM_RESOLUTION - 2, 0)] + x[getIndex(SIM_RESOLUTION - 1, 1)]);
-            x[getIndex(SIM_RESOLUTION - 1, SIM_RESOLUTION - 1)] = 0.5 * (x[getIndex(SIM_RESOLUTION - 2, SIM_RESOLUTION - 1)] + x[getIndex(SIM_RESOLUTION - 1, SIM_RESOLUTION - 2)]);
-        };
+            // Map pointer (-1 to 1) to UV space (0 to 1)
+            const uvMouse = new THREE.Vector2(
+                (mouse.current.x + 1) / 2,
+                (mouse.current.y + 1) / 2
+            );
 
-        const linSolve = (b, x, x0, a, c) => {
-            const cRecip = 1.0 / c;
-            for (let k = 0; k < PRESSURE_ITERATIONS; k++) {
-                for (let j = 1; j < SIM_RESOLUTION - 1; j++) {
-                    for (let i = 1; i < SIM_RESOLUTION - 1; i++) {
-                        x[getIndex(i, j)] =
-                            (x0[getIndex(i, j)] +
-                                a *
-                                (x[getIndex(i + 1, j)] +
-                                    x[getIndex(i - 1, j)] +
-                                    x[getIndex(i, j + 1)] +
-                                    x[getIndex(i, j - 1)])) *
-                            cRecip;
-                    }
-                }
-                setBnd(b, x);
-            }
-        };
-
-        const diffuse = (b, x, x0, diff, dt) => {
-            const a = dt * diff * (SIM_RESOLUTION - 2) * (SIM_RESOLUTION - 2);
-            linSolve(b, x, x0, a, 1 + 4 * a);
-        };
-
-        const project = (u, v, p, div) => {
-            for (let j = 1; j < SIM_RESOLUTION - 1; j++) {
-                for (let i = 1; i < SIM_RESOLUTION - 1; i++) {
-                    div[getIndex(i, j)] =
-                        (-0.5 *
-                            (u[getIndex(i + 1, j)] -
-                                u[getIndex(i - 1, j)] +
-                                v[getIndex(i, j + 1)] -
-                                v[getIndex(i, j - 1)])) /
-                        SIM_RESOLUTION;
-                    p[getIndex(i, j)] = 0;
-                }
-            }
-            setBnd(0, div);
-            setBnd(0, p);
-            linSolve(0, p, div, 1, 4);
-
-            for (let j = 1; j < SIM_RESOLUTION - 1; j++) {
-                for (let i = 1; i < SIM_RESOLUTION - 1; i++) {
-                    u[getIndex(i, j)] -= 0.5 * (p[getIndex(i + 1, j)] - p[getIndex(i - 1, j)]) * SIM_RESOLUTION;
-                    v[getIndex(i, j)] -= 0.5 * (p[getIndex(i, j + 1)] - p[getIndex(i, j - 1)]) * SIM_RESOLUTION;
-                }
-            }
-            setBnd(1, u);
-            setBnd(2, v);
-        };
-
-        const advect = (b, d, d0, u, v, dt) => {
-            let i0, j0, i1, j1;
-            let x, y, s0, t0, s1, t1;
-            let dt0 = dt * (SIM_RESOLUTION - 2);
-
-            for (let j = 1; j < SIM_RESOLUTION - 1; j++) {
-                for (let i = 1; i < SIM_RESOLUTION - 1; i++) {
-                    x = i - dt0 * u[getIndex(i, j)];
-                    y = j - dt0 * v[getIndex(i, j)];
-
-                    if (x < 0.5) x = 0.5;
-                    if (x > SIM_RESOLUTION - 1.5) x = SIM_RESOLUTION - 1.5;
-                    i0 = Math.floor(x);
-                    i1 = i0 + 1;
-
-                    if (y < 0.5) y = 0.5;
-                    if (y > SIM_RESOLUTION - 1.5) y = SIM_RESOLUTION - 1.5;
-                    j0 = Math.floor(y);
-                    j1 = j0 + 1;
-
-                    s1 = x - i0;
-                    s0 = 1.0 - s1;
-                    t1 = y - j0;
-                    t0 = 1.0 - t1;
-
-                    d[getIndex(i, j)] =
-                        s0 * (t0 * d0[getIndex(i0, j0)] + t1 * d0[getIndex(i0, j1)]) +
-                        s1 * (t0 * d0[getIndex(i1, j0)] + t1 * d0[getIndex(i1, j1)]);
-                }
-            }
-            setBnd(b, d);
-        };
-
-        const step = (dt) => {
-            // Velocity step
-            diffuse(1, u_prev, u, 0, dt); // Viscosity 0 for water-like
-            diffuse(2, v_prev, v, 0, dt);
-
-            project(u_prev, v_prev, u, v);
-
-            advect(1, u, u_prev, u_prev, v_prev, dt);
-            advect(2, v, v_prev, u_prev, v_prev, dt);
-
-            project(u, v, u_prev, v_prev);
-
-            // Density step
-            diffuse(0, dens_prev, density, 0, dt);
-            advect(0, density, dens_prev, u, v, dt);
-
-            // Decay
-            for (let i = 0; i < size; i++) {
-                density[i] *= DENSITY_DISSIPATION;
-                u[i] *= VELOCITY_DISSIPATION;
-                v[i] *= VELOCITY_DISSIPATION;
-            }
-        };
-
-        const render = () => {
-            ctx.clearRect(0, 0, width, height);
-
-            // Draw fluid
-            const cellWidth = width / SIM_RESOLUTION;
-            const cellHeight = height / SIM_RESOLUTION;
-
-            // Create image data for faster rendering
-            // Or just draw rects for "neon" look (glowy)
-            // Let's draw glowy rects for the "neon" feel
-
-            ctx.globalCompositeOperation = 'screen';
-
-            for (let j = 0; j < SIM_RESOLUTION; j++) {
-                for (let i = 0; i < SIM_RESOLUTION; i++) {
-                    const d = density[getIndex(i, j)];
-                    if (d > 0.01) {
-                        const x = i * cellWidth;
-                        const y = j * cellHeight;
-
-                        // Neon White color with alpha based on density
-                        const alpha = Math.min(d, 0.8);
-                        ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
-
-                        // Slight overlap to blend
-                        ctx.fillRect(x - 1, y - 1, cellWidth + 2, cellHeight + 2);
-                    }
-                }
-            }
-        };
-
-        const update = () => {
-            const dt = 0.1;
-
-            if (pointer.moved) {
-                const gridX = Math.floor((pointer.x / width) * SIM_RESOLUTION);
-                const gridY = Math.floor((pointer.y / height) * SIM_RESOLUTION);
-                const index = getIndex(gridX, gridY);
-
-                // Add density and velocity at mouse position
-                density[index] += 2.0; // Add "dye"
-                u[index] += pointer.dx * 0.5;
-                v[index] += pointer.dy * 0.5;
-
-                pointer.moved = false;
-            }
-
-            step(dt);
-            render();
-            requestAnimationFrame(update);
-        };
-
-        const handleMouseMove = (e) => {
-            pointer.dx = e.clientX - pointer.x;
-            pointer.dy = e.clientY - pointer.y;
-            pointer.x = e.clientX;
-            pointer.y = e.clientY;
-            pointer.moved = true;
-        };
-
-        window.addEventListener('resize', resize);
-        window.addEventListener('mousemove', handleMouseMove);
-
-        resize();
-        update();
-
-        return () => {
-            window.removeEventListener('resize', resize);
-            window.removeEventListener('mousemove', handleMouseMove);
-        };
-    }, []);
+            mesh.current.material.uniforms.uMouse.value = uvMouse;
+            mesh.current.material.uniforms.uResolution.value.set(size.width, size.height);
+        }
+    });
 
     return (
-        <canvas
-            ref={canvasRef}
-            className="fixed inset-0 pointer-events-none z-0 opacity-40 mix-blend-screen"
-        />
+        <mesh ref={mesh} scale={[viewport.width, viewport.height, 1]}>
+            <planeGeometry args={[1, 1]} />
+            <shaderMaterial
+                uniforms={uniforms}
+                vertexShader={FluidShader.vertexShader}
+                fragmentShader={FluidShader.fragmentShader}
+            />
+        </mesh>
+    );
+};
+
+const FluidBackground = () => {
+    return (
+        <div className="fixed inset-0 z-[-1] bg-matte-black">
+            <Canvas camera={{ position: [0, 0, 1] }} dpr={[1, 2]}>
+                <FluidPlane />
+            </Canvas>
+        </div>
     );
 };
 

@@ -39,8 +39,11 @@ const MoodInput = ({ onCalculate }) => {
     };
 
     return (
-        <div className="bg-dark-gray/50 p-8 rounded-2xl border border-dark-gray shadow-neon backdrop-blur-sm">
-            <form onSubmit={handleSubmit}>
+        <div className="bg-matte-black/40 backdrop-blur-xl border border-white/10 p-10 rounded-[2rem] shadow-[0_0_50px_rgba(0,0,0,0.5)] relative overflow-hidden">
+            {/* Decorative background element */}
+            <div className="absolute top-0 right-0 w-64 h-64 bg-neon-white/5 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
+
+            <form onSubmit={handleSubmit} className="relative z-10">
                 <MoodSlider
                     label="Stress Level"
                     value={moodData.stress}
@@ -72,7 +75,7 @@ const MoodInput = ({ onCalculate }) => {
 
                 <button
                     type="submit"
-                    className="w-full mt-6 py-4 bg-neon-accent text-matte-black font-bold text-lg rounded-xl hover:bg-neon-blue hover:shadow-[0_0_20px_rgba(0,243,255,0.5)] transition-all duration-300 transform hover:-translate-y-1"
+                    className="w-full mt-8 py-4 bg-white text-black font-display font-bold text-lg rounded-xl hover:bg-gray-200 hover:shadow-[0_0_20px_rgba(255,255,255,0.3)] transition-all duration-300 transform hover:-translate-y-1 tracking-widest uppercase"
                 >
                     Analyze Burnout
                 </button>
